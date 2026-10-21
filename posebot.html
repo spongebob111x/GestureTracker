@@ -27,7 +27,7 @@ let classes=[],map={},running=false,busy=false,lastClass='',streak=0,current='ST
 const $=id=>document.getElementById(id), verbs=['STOP','FORWARD','LEFT','RIGHT','REVERSE'];
 function status(msg,error=false){$('status').textContent=msg;$('status').className='status'+(error?' err':'');}
 function resetRobot(){robot={x:220,y:205,a:-Math.PI/2};current='STOP';$('command').textContent='STOP';drawArena();}
-function stopCamera(){running=false;current='STOP';if(cam){cam.stop();cam=null;}status('Webcam stopped.');}
+function stopCamera(message='Webcam stopped.',isError=false){running=false;current='STOP';$('command').textContent='STOP';if(cam){try{cam.stop();}catch(e){console.warn('Camera cleanup:',e);}cam=null;}status(message,isError);}
 function makeMappings(){
  const area=$('mapping');area.replaceChildren();
  classes.forEach((c,i)=>{
@@ -48,11 +48,10 @@ async function start(){
   else throw Error('Provide a model URL in the Streamlit sidebar or select all three exported files.');
   classes=(await model.getTotalClasses())?Array.from({length:model.getTotalClasses()},(_,i)=>`Class ${i+1}`):[];
   // Class names are returned in prediction results.
-  const preview=document.createElement('canvas');preview.width=400;preview.height=400;
   cam=new tmPose.Webcam(400,400,true);await cam.setup();await cam.play();running=true;
   status('Camera active. Stand back so your shoulders, arms and hands fit in frame.');
   requestAnimationFrame(loop);
- }catch(e){status('Could not start: '+(e.message||e),true);running=false;if(cam){cam.stop();cam=null;}}
+ }catch(e){console.error('PoseBot startup error:',e);stopCamera('Could not start: '+(e.message||String(e)),true);}
  finally{btn.disabled=false;}
 }
 async function loop(){
@@ -77,7 +76,7 @@ async function loop(){
    }
    if(frame++%3===0){renderPredictions(results);}
    moveRobot();drawArena();
- }catch(e){status('Prediction error: '+(e.message||e),true);stopCamera();return;}
+ }catch(e){console.error('PoseBot prediction error:',e);stopCamera('Prediction error: '+(e.message||String(e)),true);return;}
  if(running)requestAnimationFrame(loop);
 }
 function renderPredictions(results){const root=$('predictions');root.replaceChildren();results.forEach(r=>{
