@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+*{box-sizing:border-box}body{font:15px system-ui,sans-serif;margin:0;background:#f5f7fb;color:#182b43}.panel{background:white;border:1px solid #dfe5f0;border-radius:14px;padding:16px}.layout{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:10px 0}h3{margin:0 0 10px}button,select,input{font:inherit}button{background:#1678a2;color:white;border:0;padding:10px 16px;border-radius:9px;cursor:pointer}button.secondary{background:#516176}button:disabled{opacity:.5;cursor:wait}.files{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.files label{font-size:12px}.files input{max-width:195px;font-size:11px}#camera{width:100%;max-width:400px;aspect-ratio:1;background:#132338;border-radius:12px}#arena{width:100%;height:auto;background:#eaf6ff;border:1px solid #cbdce9;border-radius:12px}.pill{display:inline-block;background:#e4f2f9;border-radius:30px;padding:6px 10px;font-weight:700}.status{min-height:24px;margin:10px 0;color:#39546b}.err{color:#bd3030}.barrow{display:grid;grid-template-columns:105px 1fr 45px;gap:8px;align-items:center;margin:9px 0}.track{background:#eaf0f5;height:13px;border-radius:20px;overflow:hidden}.fill{height:100%;background:#1b9db6;width:0}.mapping{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}.mapping select{width:100%;font-size:12px}.mapping label{font-size:12px}small{color:#567}@media(max-width:760px){.layout{grid-template-columns:1fr}.mapping{grid-template-columns:repeat(2,1fr)}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.3/dist/teachablemachine-pose.min.js"></script>
+</head><body>
+<div class="panel">
+<div class="files"><strong>Choose model:</strong><label>model.json <input id="modelFile" type="file" accept=".json"></label><label>weights.bin <input id="weightsFile" type="file" accept=".bin"></label><label>metadata.json <input id="metadataFile" type="file" accept=".json"></label></div>
+<p><button id="start" onclick="start()">▶ Load model & start webcam</button> <button class="secondary" onclick="resetRobot()">↺ Reset robot</button> <button class="secondary" onclick="stopCamera()">■ Stop webcam</button></p>
+<div id="status" class="status">Ready. Paste a model link in the Streamlit sidebar, or choose all three exported files above.</div>
+</div>
+<div class="layout">
+  <div class="panel"><h3>1 · What the camera sees</h3><canvas id="camera" width="400" height="400"></canvas><p><span id="winner" class="pill">No prediction yet</span></p><small>Turquoise dots/lines = detected body landmarks (feature extraction). Video is mirrored like a webcam preview.</small></div>
+  <div class="panel"><h3>2 · Robot playground</h3><canvas id="arena" width="440" height="400"></canvas><p><strong>Robot command: </strong><span id="command" class="pill">STOP</span></p><small>The robot moves only when the same pose wins repeatedly with sufficient confidence. LEFT/RIGHT rotate; FORWARD/REVERSE move in the facing direction.</small></div>
+</div>
+<div class="layout">
+  <div class="panel"><h3>3 · Pose confidence</h3><div id="predictions">Load a model to see the probabilities.</div></div>
+  <div class="panel"><h3>4 · Connect poses to robot commands</h3><div id="mapping" class="mapping">Mappings appear after loading a model.</div><p><small>Use any five class names; map each class to the correct command here. Best results with distinct arm poses and arms in the camera frame.</small></p></div>
+</div>
+<script>
+const MODEL_URL = __MODEL_URL__;
+const THRESHOLD = __THRESHOLD__;
+let model=null,cam=null,ctx=document.getElementById('camera').getContext('2d');
+let classes=[],map={},running=false,busy=false,lastClass='',streak=0,current='STOP',robot={x:220,y:205,a:-Math.PI/2},frame=0;
+const $=id=>document.getElementById(id), verbs=['STOP','FORWARD','LEFT','RIGHT','REVERSE'];
+function status(msg,error=false){$('status').textContent=msg;$('status').className='status'+(error?' err':'');}
+function resetRobot(){robot={x:220,y:205,a:-Math.PI/2};current='STOP';$('command').textContent='STOP';drawArena();}
+function stopCamera(){running=false;current='STOP';if(cam){cam.stop();cam=null;}status('Webcam stopped.');}
+function makeMappings(){
+ const area=$('mapping');area.replaceChildren();
+ classes.forEach((c,i)=>{
+  const label=document.createElement('label');label.textContent=c;const select=document.createElement('select');
+  const preferred=verbs.find(v=>c.trim().toUpperCase()===v)||verbs[Math.min(i,4)];map[c]=preferred;
+  verbs.forEach(v=>{let op=document.createElement('option');op.value=v;op.textContent=v;select.appendChild(op)});
+  select.value=preferred;select.onchange=()=>map[c]=select.value;label.appendChild(select);area.appendChild(label);
+ });
+}
+async function start(){
+ if(running){status('Already running. Stop webcam to restart.');return;}
+ const btn=$('start');btn.disabled=true;status('Loading the pose model. This may take a moment on first use...');
+ try{
+  if(!window.tmPose)throw Error('Pose library could not load. Check your internet connection.');
+  const mf=$('modelFile').files[0],wf=$('weightsFile').files[0],meta=$('metadataFile').files[0];
+  if(mf&&wf&&meta){model=await tmPose.loadFromFiles(mf,wf,meta)}
+  else if(MODEL_URL){let url=MODEL_URL.trim().replace(/\/(model|metadata)\.json(\?.*)?$/i,'/');if(!url.endsWith('/'))url+='/';model=await tmPose.load(url+'model.json',url+'metadata.json')}
+  else throw Error('Provide a model URL in the Streamlit sidebar or select all three exported files.');
+  classes=(await model.getTotalClasses())?Array.from({length:model.getTotalClasses()},(_,i)=>`Class ${i+1}`):[];
+  // Class names are returned in prediction results.
+  const preview=document.createElement('canvas');preview.width=400;preview.height=400;
+  cam=new tmPose.Webcam(400,400,true);await cam.setup();await cam.play();running=true;
+  status('Camera active. Stand back so your shoulders, arms and hands fit in frame.');
+  requestAnimationFrame(loop);
+ }catch(e){status('Could not start: '+(e.message||e),true);running=false;if(cam){cam.stop();cam=null;}}
+ finally{btn.disabled=false;}
+}
+async function loop(){
+ if(!running||!cam)return;
+ try{
+   cam.update();
+   const {pose,posenetOutput}=await model.estimatePose(cam.canvas);
+   const results=await model.predict(posenetOutput);
+   if(!running)return;
+   if(!classes.length||classes[0].startsWith('Class ')){
+     classes=results.map(r=>r.className);makeMappings();
+   }
+   ctx.clearRect(0,0,400,400);ctx.drawImage(cam.canvas,0,0,400,400);
+   if(pose){tmPose.drawKeypoints(pose.keypoints,0.45,ctx);tmPose.drawSkeleton(pose.keypoints,0.45,ctx);}
+   const sorted=[...results].sort((a,b)=>b.probability-a.probability);
+   const best=sorted[0];
+   if(best){
+     $('winner').textContent=`${best.className}: ${(best.probability*100).toFixed(1)}%`;
+     if(best.probability>=THRESHOLD){if(best.className===lastClass)streak++;else{lastClass=best.className;streak=1;}if(streak>=3)current=map[best.className]||'STOP';}
+     else{current='STOP';lastClass='';streak=0;}
+     $('command').textContent=current;
+   }
+   if(frame++%3===0){renderPredictions(results);}
+   moveRobot();drawArena();
+ }catch(e){status('Prediction error: '+(e.message||e),true);stopCamera();return;}
+ if(running)requestAnimationFrame(loop);
+}
+function renderPredictions(results){const root=$('predictions');root.replaceChildren();results.forEach(r=>{
+ const row=document.createElement('div');row.className='barrow';
+ const name=document.createElement('span');name.textContent=r.className;
+ const track=document.createElement('div');track.className='track';const fill=document.createElement('div');fill.className='fill';fill.style.width=`${(r.probability*100).toFixed(1)}%`;track.appendChild(fill);
+ const val=document.createElement('span');val.textContent=`${(r.probability*100).toFixed(0)}%`;row.append(name,track,val);root.appendChild(row);
+ });}
+function moveRobot(){if(current==='LEFT')robot.a-=.035;if(current==='RIGHT')robot.a+=.035;
+ let step=current==='FORWARD'?2:current==='REVERSE'?-2:0;
+ robot.x=Math.max(18,Math.min(422,robot.x+Math.cos(robot.a)*step));
+ robot.y=Math.max(18,Math.min(382,robot.y+Math.sin(robot.a)*step));}
+function drawArena(){const c=$('arena'),g=c.getContext('2d');g.clearRect(0,0,440,400);
+ g.fillStyle='#eaf6ff';g.fillRect(0,0,440,400);g.strokeStyle='#c8dfea';g.lineWidth=1;
+ for(let x=0;x<=440;x+=40){g.beginPath();g.moveTo(x,0);g.lineTo(x,400);g.stroke();}
+ for(let y=0;y<=400;y+=40){g.beginPath();g.moveTo(0,y);g.lineTo(440,y);g.stroke();}
+ g.save();g.translate(robot.x,robot.y);g.rotate(robot.a);g.fillStyle='#187ba0';g.strokeStyle='#0e4d68';g.lineWidth=3;
+ g.beginPath();g.roundRect(-18,-14,36,28,7);g.fill();g.stroke();
+ g.beginPath();g.moveTo(25,0);g.lineTo(9,-10);g.lineTo(9,10);g.closePath();g.fillStyle='#eab54b';g.fill();g.restore();
+ g.fillStyle='#415b6a';g.font='13px system-ui';g.fillText('Robot playground · arrows indicate heading',12,22);
+}
+drawArena();
+</script></body></html>
